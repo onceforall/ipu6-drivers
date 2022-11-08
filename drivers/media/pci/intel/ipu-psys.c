@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2013 - 2020 Intel Corporation
+// Copyright (C) 2013 - 2022 Intel Corporation
 
 #include <linux/debugfs.h>
 #include <linux/delay.h>
@@ -337,17 +337,36 @@ static struct sg_table *ipu_dma_buf_map(struct dma_buf_attachment *attach,
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0)
 	dma_set_attr(DMA_ATTR_SKIP_CPU_SYNC, &attrs);
-	ret = dma_map_sgtable(attach->dev, ipu_attach->sgt, dir, attrs);
+	ret = dma_map_sg_attrs(attach->dev, ipu_attach->sgt->sgl,
+			       ipu_attach->sgt->orig_nents, dir, &attrs);
+	if (!ret) {
+		ipu_psys_put_userpages(ipu_attach);
+		dev_dbg(attach->dev, "buf map failed\n");
+
+		return ERR_PTR(-EIO);
+	}
+	ipu_attach->sgt->nents = ret;
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+	attrs = DMA_ATTR_SKIP_CPU_SYNC;
+	ret = dma_map_sg_attrs(attach->dev, ipu_attach->sgt->sgl,
+			       ipu_attach->sgt->orig_nents, dir, attrs);
+	if (!ret) {
+		ipu_psys_put_userpages(ipu_attach);
+		dev_dbg(attach->dev, "buf map failed\n");
+
+		return ERR_PTR(-EIO);
+	}
+	ipu_attach->sgt->nents = ret;
 #else
 	attrs = DMA_ATTR_SKIP_CPU_SYNC;
 	ret = dma_map_sgtable(attach->dev, ipu_attach->sgt, dir, attrs);
-#endif
 	if (ret < 0) {
 		ipu_psys_put_userpages(ipu_attach);
 		dev_dbg(attach->dev, "buf map failed\n");
 
 		return ERR_PTR(-EIO);
 	}
+#endif
 
 	/*
 	 * Initial cache flush to avoid writing dirty pages for buffers which
@@ -364,7 +383,11 @@ static void ipu_dma_buf_unmap(struct dma_buf_attachment *attach,
 {
 	struct ipu_dma_buf_attach *ipu_attach = attach->priv;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+	dma_unmap_sg(attach->dev, sgt->sgl, sgt->orig_nents, dir);
+#else
 	dma_unmap_sgtable(attach->dev, sgt, dir, DMA_ATTR_SKIP_CPU_SYNC);
+#endif
 	ipu_psys_put_userpages(ipu_attach);
 }
 
@@ -404,7 +427,7 @@ static int ipu_dma_buf_begin_cpu_access(struct dma_buf *dma_buf,
 	return -ENOTTY;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0) || LINUX_VERSION_CODE == KERNEL_VERSION(5, 15, 70)
 static int ipu_dma_buf_vmap(struct dma_buf *dmabuf, struct iosys_map *map)
 {
 	struct dma_buf_attachment *attach;
@@ -475,7 +498,7 @@ static void *ipu_dma_buf_vmap(struct dma_buf *dmabuf)
 }
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0) || LINUX_VERSION_CODE == KERNEL_VERSION(5, 15, 70)
 static void ipu_dma_buf_vunmap(struct dma_buf *dmabuf, struct iosys_map *map)
 {
 	struct dma_buf_attachment *attach;
@@ -594,7 +617,7 @@ static inline void ipu_psys_kbuf_unmap(struct ipu_psys_kbuffer *kbuf)
 		return;
 
 	kbuf->valid = false;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0) || LINUX_VERSION_CODE == KERNEL_VERSION(5, 15, 70)
 	if (kbuf->kaddr) {
 		struct iosys_map dmap;
 
@@ -739,7 +762,7 @@ int ipu_psys_mapbuf_locked(int fd, struct ipu_psys_fh *fh,
 {
 	struct ipu_psys *psys = fh->psys;
 	struct dma_buf *dbuf;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0) || LINUX_VERSION_CODE == KERNEL_VERSION(5, 15, 70)
 	struct iosys_map dmap;
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE != KERNEL_VERSION(5, 10, 46)
 	struct dma_buf_map dmap;
@@ -1421,7 +1444,7 @@ static int ipu_psys_fw_init(struct ipu_psys *psys)
 	int i;
 
 	size = IPU6SE_FW_PSYS_N_PSYS_CMD_QUEUE_ID;
-	if (ipu_ver == IPU_VER_6 || ipu_ver == IPU_VER_6EP)
+	if (ipu_ver == IPU_VER_6 || ipu_ver == IPU_VER_6EP || ipu_ver == IPU_VER_6EP_MTL)
 		size = IPU6_FW_PSYS_N_PSYS_CMD_QUEUE_ID;
 
 	queue_cfg = devm_kzalloc(&psys->adev->dev, sizeof(*queue_cfg) * size,
@@ -1470,6 +1493,10 @@ static int ipu_psys_probe(struct ipu_bus_device *adev)
 	struct ipu_psys *psys;
 	unsigned int minor;
 	int i, rval = -E2BIG;
+
+	/* firmware is not ready, so defer the probe */
+	if (!isp->pkg_dir)
+		return -EPROBE_DEFER;
 
 	rval = ipu_mmu_hw_init(adev->mmu);
 	if (rval)
@@ -1657,8 +1684,6 @@ static void ipu_psys_remove(struct ipu_bus_device *adev)
 		debugfs_remove_recursive(psys->debugfsdir);
 #endif
 
-	flush_workqueue(IPU_PSYS_WORK_QUEUE);
-
 	if (psys->sched_cmd_thread) {
 		kthread_stop(psys->sched_cmd_thread);
 		psys->sched_cmd_thread = NULL;
@@ -1778,6 +1803,7 @@ static const struct pci_device_id ipu_pci_tbl[] = {
 	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, IPU6EP_ADL_P_PCI_ID)},
 	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, IPU6EP_ADL_N_PCI_ID)},
 	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, IPU6EP_RPL_P_PCI_ID)},
+	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, IPU6EP_MTL_PCI_ID)},
 	{0,}
 };
 MODULE_DEVICE_TABLE(pci, ipu_pci_tbl);

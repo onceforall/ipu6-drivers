@@ -128,7 +128,6 @@ static int __dma_free_buffer(struct device *dev, struct page **pages,
 
 	for (i = 0; i < count; i++) {
 		if (pages[i]) {
-			__dma_clear_buffer(pages[i], PAGE_SIZE, attrs);
 			__free_pages(pages[i], 0);
 		}
 	}
@@ -313,7 +312,7 @@ static void ipu_dma_free(struct device *dev, size_t size, void *vaddr,
 	}
 
 	ipu_mmu_unmap(mmu->dmap->mmu_info, iova->pfn_lo << PAGE_SHIFT,
-		      (iova->pfn_hi - iova->pfn_lo + 1) << PAGE_SHIFT);
+		      iova_size(iova) << PAGE_SHIFT);
 
 	__dma_free_buffer(dev, pages, size, attrs);
 
@@ -389,7 +388,7 @@ static void ipu_dma_unmap_sg(struct device *dev,
 
 	/* get the nents as orig_nents given by caller */
 	count = 0;
-	npages = (iova->pfn_hi - iova->pfn_lo + 1);
+	npages = iova_size(iova);
 	for_each_sg(sglist, sg, nents, i) {
 		if (sg_dma_len(sg) == 0 ||
 		    sg_dma_address(sg) == DMA_MAPPING_ERROR)
@@ -407,10 +406,6 @@ static void ipu_dma_unmap_sg(struct device *dev,
 	 */
 	dev_dbg(dev, "trying to unmap concatenated %u ents\n", count);
 	for_each_sg(sglist, sg, count, i) {
-		if (sg_dma_len(sg) == 0 ||
-		    sg_dma_address(sg) == DMA_MAPPING_ERROR)
-			break;
-
 		dev_dbg(dev, "ipu_unmap sg[%d] %pad\n", i, &sg_dma_address(sg));
 		pci_dma_addr = ipu_mmu_iova_to_phys(mmu->dmap->mmu_info,
 						    sg_dma_address(sg));
@@ -422,7 +417,7 @@ static void ipu_dma_unmap_sg(struct device *dev,
 	dev_dbg(dev, "ipu_mmu_unmap low pfn %lu high pfn %lu\n",
 		iova->pfn_lo, iova->pfn_hi);
 	ipu_mmu_unmap(mmu->dmap->mmu_info, iova->pfn_lo << PAGE_SHIFT,
-		      (iova->pfn_hi - iova->pfn_lo + 1) << PAGE_SHIFT);
+		      iova_size(iova) << PAGE_SHIFT);
 
 	mmu->tlb_invalidate(mmu);
 
@@ -485,7 +480,6 @@ static int ipu_dma_map_sg(struct device *dev, struct scatterlist *sglist,
 			goto out_fail;
 
 		sg_dma_address(sg) = iova_addr << PAGE_SHIFT;
-		sg->length = sg_dma_len(sg);
 
 		iova_addr += PAGE_ALIGN(sg_dma_len(sg)) >> PAGE_SHIFT;
 	}
