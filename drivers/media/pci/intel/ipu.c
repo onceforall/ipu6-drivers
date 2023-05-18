@@ -9,6 +9,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/pci.h>
+#include <linux/pci-ats.h>
 #include <linux/pm_qos.h>
 #include <linux/pm_runtime.h>
 #include <linux/timer.h>
@@ -351,6 +352,11 @@ static int ipu_pci_config_setup(struct pci_dev *dev)
 	pci_command |= PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER;
 	pci_write_config_word(dev, PCI_COMMAND, pci_command);
 
+	/* disable IPU6 PCI ATS on mtl ES2 */
+	if (ipu_ver == IPU_VER_6EP_MTL && boot_cpu_data.x86_stepping == 0x2 &&
+	    pci_ats_supported(dev))
+		pci_disable_ats(dev);
+
 	/* no msi pci capability for IPU6EP */
 	if (ipu_ver == IPU_VER_6EP || ipu_ver == IPU_VER_6EP_MTL) {
 		/* likely do nothing as msi not enabled by default */
@@ -485,10 +491,13 @@ static int ipu_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		isp->cpd_fw_name = IPU6SE_FIRMWARE_NAME;
 		break;
 	case IPU6EP_ADL_P_PCI_ID:
-	case IPU6EP_ADL_N_PCI_ID:
 	case IPU6EP_RPL_P_PCI_ID:
 		ipu_ver = IPU_VER_6EP;
 		isp->cpd_fw_name = is_es ? IPU6EPES_FIRMWARE_NAME : IPU6EP_FIRMWARE_NAME;
+		break;
+	case IPU6EP_ADL_N_PCI_ID:
+		ipu_ver = IPU_VER_6EP;
+		isp->cpd_fw_name = IPU6EPADLN_FIRMWARE_NAME;
 		break;
 	case IPU6EP_MTL_PCI_ID:
 		ipu_ver = IPU_VER_6EP_MTL;
